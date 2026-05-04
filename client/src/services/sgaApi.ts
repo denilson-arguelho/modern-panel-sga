@@ -2,7 +2,7 @@ import axios, { AxiosInstance } from 'axios';
 
 export interface SGAConfig {
   server: string;
-  moduleName: string;
+  moduleName?: string;
   clientId: string;
   clientSecret: string;
   username: string;
@@ -36,8 +36,11 @@ class SGAClient {
   private endpoint: string;
   private accessToken: string | null = null;
   private refreshToken: string | null = null;
+  private config: SGAConfig;
 
   constructor(config: SGAConfig) {
+    this.config = config;
+    
     let host = config.server;
     if (!host.endsWith('/')) {
       host += '/';
@@ -51,6 +54,7 @@ class SGAClient {
     this.client = axios.create({
       baseURL: this.endpoint,
       withCredentials: true,
+      timeout: 30000,
     });
 
     // Add interceptor to include token in requests
@@ -60,6 +64,55 @@ class SGAClient {
       }
       return config;
     });
+
+    // Add response interceptor to handle token refresh
+    this.client.interceptors.response.use(
+      (response) => response,
+      async (error) => {
+        const originalRequest = error.config;
+        
+        if (error.response?.status === 401 && !originalRequest._retry) {
+          originalRequest._retry = true;
+          
+          try {
+            await this.refreshAccessToken();
+            return this.client(originalRequest);
+          } catch (refreshError) {
+            return Promise.reject(refreshError);
+          }
+        }
+        
+        return Promise.reject(error);
+      }
+    );
+  }
+
+  private async refreshAccessToken() {
+    if (!this.refreshToken) {
+      throw new Error('No refresh token available');
+    }
+
+    try {
+      const params = new URLSearchParams();
+      params.append('grant_type', 'refresh_token');
+      params.append('client_id', this.config.clientId);
+      params.append('client_secret', this.config.clientSecret);
+      params.append('refresh_token', this.refreshToken);
+
+      const response = await axios.post(`${this.endpoint}/token`, params, {
+        headers: {
+          'Content-Type': 'application/x-www-form-urlencoded',
+        },
+        withCredentials: true,
+      });
+
+      this.accessToken = response.data.access_token;
+      this.refreshToken = response.data.refresh_token;
+
+      return response.data;
+    } catch (error: any) {
+      throw new Error(`Token refresh failed: ${error.response?.data?.error_description || error.message}`);
+    }
   }
 
   async authenticate(clientId: string, clientSecret: string, username: string, password: string) {
@@ -71,10 +124,11 @@ class SGAClient {
       params.append('username', username);
       params.append('password', password);
 
-      const response = await this.client.post('/token', params, {
+      const response = await axios.post(`${this.endpoint}/token`, params, {
         headers: {
           'Content-Type': 'application/x-www-form-urlencoded',
         },
+        withCredentials: true,
       });
 
       this.accessToken = response.data.access_token;
@@ -86,9 +140,12 @@ class SGAClient {
         expiresIn: response.data.expires_in,
       };
     } catch (error: any) {
+      const errorMessage = error.response?.data?.error_description || 
+                          error.response?.statusText || 
+                          error.message;
       return {
         success: false,
-        error: error.response?.data?.error_description || error.message,
+        error: errorMessage,
       };
     }
   }
@@ -101,9 +158,10 @@ class SGAClient {
         data: response.data,
       };
     } catch (error: any) {
+      const errorMessage = error.response?.statusText || error.message;
       return {
         success: false,
-        error: error.response?.statusText || error.message,
+        error: errorMessage,
       };
     }
   }
@@ -116,9 +174,10 @@ class SGAClient {
         data: response.data as SGAUnity[],
       };
     } catch (error: any) {
+      const errorMessage = error.response?.statusText || error.message;
       return {
         success: false,
-        error: error.response?.statusText || error.message,
+        error: errorMessage,
       };
     }
   }
@@ -131,9 +190,10 @@ class SGAClient {
         data: response.data as SGAService[],
       };
     } catch (error: any) {
+      const errorMessage = error.response?.statusText || error.message;
       return {
         success: false,
-        error: error.response?.statusText || error.message,
+        error: errorMessage,
       };
     }
   }
@@ -147,15 +207,16 @@ class SGAClient {
         },
       });
 
-      const messages = response.data as SGAMessage[];
+      const messages = Array.isArray(response.data) ? response.data : [response.data];
       return {
         success: true,
-        data: messages,
+        data: messages as SGAMessage[],
       };
     } catch (error: any) {
+      const errorMessage = error.response?.statusText || error.message;
       return {
         success: false,
-        error: error.response?.statusText || error.message,
+        error: errorMessage,
       };
     }
   }
